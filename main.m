@@ -5,10 +5,10 @@ close all; clear; clc;
 % Load data into a table then remove unnecessary data then sort rows by price
 data_raw = readtable("train.csv", VariableNamingRule="preserve");
 data = sortrows(data_raw, width(data_raw));
-data(:, ["Id", "MSSubClass", "BsmtFinSF1", "BsmtFinSF2", "BsmtUnfSF", "LowQualFinSF"]) = []; 
+data(:, ["Id", "MSSubClass", "BsmtFinSF1", "BsmtFinSF2", "BsmtUnfSF", "LowQualFinSF"]) = [];
 
 %get numeric variables and replace NaNs with zeros
-data_num = data(:, vartype("numeric")); 
+data_num = data(:, vartype("numeric"));
 data_num{:, :}(isnan(data_num.Variables)) = 0;
 
 %remove sparse variables and low variance variables
@@ -38,59 +38,44 @@ data_dis(:, sum(data_dis.Variables) == 0) = [];
 data_num(:, data_dis.Properties.VariableNames) = [];
 
 %get categorical variables
-data_str = data(:, vartype("cell"));                               
+data_str = data(:, vartype("cell"));
 
 %separate target variable
 price = data_num.SalePrice; data_num(:, "SalePrice") = [];
 
-%% Statistical Analysis to Determine Outliers in Sale Price
+%% Exploritory Training Data Analysis
 
 %get histogram data on a selected variable
 current_var = price; step = range(current_var)/20;
-figure
-h = histogram(current_var, round(range(current_var)/step));
-y = h.Values; x = (h.BinEdges(2:end) + h.BinEdges(1:end-1))/2;
-
-%define symbolic model for histogram fit
-s = sym('s', [4, 1]); z = sym('z');
-
-%define function for fit
-F = s(1)*z.^s(2).*exp(s(3)*z + s(4)); 
-
-%normalize data and define function handle for efficiency
-x_s = x/max(x); y_s = y/max(y);
-f = matlabFunction(subs(F, z, x_s), 'vars', {s});
-
-%optimize using LM method
-[k, e] = solvelm(@(s) mean((y_s - f(s)).^2), ones(4, 1), 1e2, 1e-6, 1e-3);  
-
-%rescale fitted function (beacuase of normalization)
-f = matlabFunction(subs(max(y)*F, [s; z], [k; z/max(x)]), 'vars', {z});
-
-X = linspace(0, max(x), 1e3);
-hold on
-plot(X, f(X), 'r') 
-hold off
-title(['Normalized MSE = ', num2str(min(e)), ', r^2 = ', num2str(1 - sum((y - f(x)).^2)/sum((mean(y) - f(x)).^2))])
-xlabel('Price')
-ylabel('Number of Houses')
-grid
 
 %plot each numeric variable vs price
 figure
-title("Numeric Variables Vs. Price")
+sgtitle("Numeric Variables Plotted Against Price & Their Linear Correlation \it{r} ")
 for i = 1:width(data_num)
     subplot(ceil(sqrt(width(data_num))), floor(sqrt(width(data_num))), i)
-    plot(data_num{:, i}, price(:), '.')
+    r = round(corrcoef(price, data_num{:, i}), 2);
+    plot(data_num{:, i}, price, '.')
+    title(['r = ', num2str(r(2))])
     grid
     xlabel(data_num.Properties.VariableNames(i))
 end
 
-%% Principal Component Analysis
+figure
+sgtitle("Discrete Variables Plotted Against Price & Their Linear Correlation \it{r} ")
+for i = 1:width(data_dis)
+    subplot(ceil(sqrt(width(data_dis))), floor(sqrt(width(data_dis))), i)
+    r = round(corrcoef(price, data_dis{:, i}), 2);
+    plot(data_dis{:, i}, price, '.')
+    title(['r = ', num2str(r(2))])
+    grid
+    xlabel(data_dis.Properties.VariableNames(i))
+end
+
+%% Principal Component Analysis for Continious Numeric Data
 
 %compute mean and std for standardization
 mu = mean(data_num); sigma = std(data_num);
-data_num_std = (data_num - mu)./sigma;                             
+data_num_std = (data_num - mu)./sigma;
 
 %eigen decomposition of covariance matrix
 [V, D] = eig(cov(data_num_std.Variables));
@@ -99,7 +84,7 @@ D = diag(D);
 V = V(:, ind);
 
 %percentage of variance explained and minimum threshold for retained variance
-explained = D / sum(D) * 100; min_exp = 90;
+explained = D / sum(D) * 100; min_exp = 95;
 num_var = (find(cumsum(explained) >= min_exp, 1)+ 1);
 
 % Plot PCA spectrum and cumulative variance
@@ -121,62 +106,70 @@ grid
 xlabel('Number of Summed Components'); ylabel('% Variance Explained by X-Axis')
 axis tight
 
-%% Machine Learning Tryouts
-
-methods = {'ANN', 'BT', 'RF', 'GBT'}; e = cell(size(methods));
+%% Regression Tree
 
 %select training sample indices
-train_ind = round(0.1*height(data_num)):round(0.6*height(data_num));
+train_ind = 1:height(data_num);
 
 %project data to PCA space and reduce dimensions
 train_data_num = data_num{train_ind, :}*V;
-train_data = train_data_num(:, 1:num_var);
+train_data = [train_data_num(:, 1:num_var), data_dis{train_ind, :}];
 train_price = price(train_ind);
 
-%feedforward neural net and its settings
-ANN = feedforwardnet([20, 20]);
-ANN.trainFcn = 'trainlm';
-ANN.layers{1:end-1}.transferFcn = 'tansig';
-ANN.layers{end}.transferFcn = 'purelin';
-ANN.performFcn = 'mse';
-ANN.trainParam.epochs = 1e3;
-ANN.trainParam.max_fail = 50;
-ANN.trainParam.goal = 1e-9;
-ANN.trainParam.min_grad = 1e-12;
-ANN.trainParam.mu_max = 1e12;
-[ANN, perf] = train(ANN, train_data.', train_price.');
-
-in = train_data.';
-out = ANN( in ).';
-e{1} = out - train_price;
-
-%train Random Forest using
-RF = TreeBagger(200, train_data, train_price, 'Method', 'regression', 'OOBPrediction', 'on', 'OOBPredictorImportance', 'on');
-
-out = predict(RF, train_data);
-e{2} = out - train_price;
-
-%train decision tree
-tree_model = fitrtree(train_data, train_price);
-out = predict(tree_model, train_data);
-e{3} = out - train_price;
-
 %define regression tree and train gradient boosting ensemble
-t = templateTree('MinLeafSize', 5);
-GBM = fitensemble(train_data, train_price, 'LSBoost', 300, t, 'LearnRate', 0.1);
-out = predict(GBM, train_data);
-e{4} = out - train_price;
+tree = templateTree('MinLeafSize', 3);
+GBM = fitensemble(train_data, train_price, 'LSBoost', 5e2, tree, 'LearnRate', 1e-1);
 
+data_test_raw = readtable("test.csv", VariableNamingRule="preserve");
+test_data_dis = data_test_raw(:, data_dis.Properties.VariableNames);
+test_data_num = data_test_raw{:, data_num.Properties.VariableNames}*V;
+test_data = [test_data_num(:, 1:num_var), test_data_dis{:, :}];
+
+
+out = predict(GBM, test_data);
+data_test_raw(:, end + 1) = table(out);
+data_test_raw.Properties.VariableNames(end) = {'SalePrice'};
+
+perf = [std(out)/std(price) , mean(out)/mean(price)];
+
+%% Statistical Analysis of Sale Price in the Test Data
+
+%get histogram data on a selected variable
 figure
-for i = 1:length(e)
-    subplot(length(e), 1, i)
-    plot(e{i}, '.')
-    xlabel('House ID'); ylabel('Price Error');
-    title([methods{i},', Mean of Error = ', num2str(mean(e{i})), ', Maximum Error = ', num2str(max(abs(e{i})))])
-    axis tight
+variables = {out, price}; titles = {"testing data", "training data"};
+for i = [1, 2]
+    current_var = variables{i}; step = range(current_var)/20;
+    
+    subplot(2, 1, i)
+    h = histogram(current_var, round(range(current_var)/step));
+    y = h.Values; x = (h.BinEdges(2:end) + h.BinEdges(1:end-1))/2;
+
+    %define symbolic model for histogram fit
+    s = sym('s', [4, 1]); z = sym('z');
+
+    %define function for fit
+    F = s(1)*z.^s(2).*exp(s(3)*z + s(4));
+
+    %normalize data and define function handle for efficiency
+    x_s = x/max(x); y_s = y/max(y);
+    f = matlabFunction(subs(F, z, x_s), 'vars', {s});
+
+    %optimize using LM method
+    [k, e] = solvelm(@(s) mean((y_s - f(s)).^2), ones(4, 1), 1e2, 1e-6, 1e-3);
+
+    %rescale fitted function (beacuase of normalization)
+    f = matlabFunction(subs(max(y)*F, [s; z], [k; z/max(x)]), 'vars', {z});
+
+    X = linspace(0, max(x), 1e3);
+    hold on
+    plot(X, f(X), 'r')
+    hold off
+    title(['Normalized MSE = ', num2str(min(e)), ', r^2 = ', num2str(1 - sum((y - f(x)).^2)/sum((mean(y) - f(x)).^2))])
+    legend({titles{i}, '$f = s_1 x^{s_2} e^{s_3 x + s_4}$'}, 'Interpreter', 'latex', 'FontSize', 14);
+    xlabel('X, Price')
+    ylabel('Y, Number of Houses')
     grid
 end
-
 %% Saving the figures
 % figs = findall(0, 'Type', 'figure'); figs(2) = [];
 % for i = 1:length(figs)
